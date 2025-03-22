@@ -9,7 +9,7 @@ SECRET_KEY = 'django-insecure-2x@c$aae*ydq63*cos!(8g@lb9+5*4d^w-g!55ia)9l-(e!^@m
 DEBUG = True
 
 
-ALLOWED_HOSTS = ['127.0.0.1', 'localhost', '192.168.100.79', '0.0.0.0']
+ALLOWED_HOSTS = ["*"]
 
 
 CORS_ALLOWED_ORIGINS = [
@@ -119,4 +119,6 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-
+import os
+if os.getenv("VERCEL"):
+    DEBUG = False
