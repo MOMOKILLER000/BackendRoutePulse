@@ -119,6 +119,3 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-import os
-if os.getenv("VERCEL"):
-    DEBUG = False
