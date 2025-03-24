@@ -33,7 +33,7 @@ CSRF_TRUSTED_ORIGINS = [
     'https://192.168.100.79:3000',
 ]
 
-ALLOWED_HOSTS = ["localhost", "192.168.100.79"]
+ALLOWED_HOSTS = ['*']
 
 INSTALLED_APPS = [
     'django.contrib.admin',
