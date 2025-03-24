@@ -19,6 +19,12 @@ from django.views.decorators.csrf import csrf_exempt
 from .models import SavedRoute, Article, Accident, Comment, Contact
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+import json
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from .firebase import send_push_notification, subscribe_token_to_topic
+from firebase_admin import messaging
+
 logger = logging.getLogger(__name__)
 from django.core.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError
@@ -142,16 +148,18 @@ def sign_up(request):
         last_name = data.get('last_name')
         preferred_transport = data.get('preferred_transport')
         notifications = data.get('notifications')
-        user_model = get_user_model()
+        firebase_token = data.get('firebase_token')
 
-        if user_model.objects.filter(email=email).exists():
+        User = get_user_model()
+
+        if User.objects.filter(email=email).exists():
             return JsonResponse({'message': 'Email is already in use.'}, status=400)
-        
-        if user_model.objects.filter(username=username).exists():
+
+        if User.objects.filter(username=username).exists():
             return JsonResponse({'message': 'Username is already in use.'}, status=400)
 
         try:
-            user = user_model.objects.create_user(
+            user = User.objects.create_user(
                 email=email,
                 password=password,
                 first_name=first_name,
@@ -159,10 +167,17 @@ def sign_up(request):
                 username=username,
                 preferred_transport=preferred_transport,
                 notifications=notifications,
+                firebase_token=firebase_token
             )
         except ValidationError as e:
             return JsonResponse({'message': str(e)}, status=400)
-        django_login(request, user)  # Use django_login here
+
+        django_login(request, user)  # Log the user in
+
+        # Optional: Send Firebase notification
+        if notifications and firebase_token:
+            send_push_notification(firebase_token, "Congratulations!", "You have notifications turned on.")
+
         return JsonResponse({
             'message': 'User created and logged in successfully.',
             'user': {
@@ -172,6 +187,7 @@ def sign_up(request):
                 'username': user.username,
                 'preferred_transport': user.preferred_transport,
                 'notifications': user.notifications,
+                'firebase_token': user.firebase_token,
             }
         }, status=201)
 
@@ -182,7 +198,7 @@ def sign_up(request):
 @csrf_protect
 def login_view(request):
     if request.method == 'POST':
-        csrf_token = get_token(request)
+        csrf_token = get_token(request)  # Debugging
         print("CSRF Token received:", csrf_token)
 
         try:
@@ -196,15 +212,8 @@ def login_view(request):
             user = authenticate(request, username=email, password=password)
 
             if user is not None:
-                if user.is_superuser:
-                    user_data = {
-                        'id': user.id,
-                        'email': user.email,
-                        'is_superuser': user.is_superuser
-                    }
-                    return JsonResponse({'message': 'First Login successful', 'user': user_data}, status=200)
-                django_login(request, user)
-                request.session.set_expiry(3600 * 6)
+                django_login(request, user)  # Login the user
+                request.session.set_expiry(3600 * 6)  # 6-hour session expiry
 
                 user_data = {
                     'id': user.id,
@@ -222,6 +231,67 @@ def login_view(request):
 
     return JsonResponse({'message': 'Method Not Allowed'}, status=405)
 
+import os
+import base64
+import json
+from deepface import DeepFace
+from django.http import JsonResponse
+from django.contrib.auth import get_user_model, login as django_login
+
+def save_temp_image(uploaded_image_data):
+    temp_dir = 'tmp'
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+    format, imgstr = uploaded_image_data.split(';base64,')
+    imgdata = base64.b64decode(imgstr)
+    temp_file_path = os.path.join(temp_dir, 'uploaded_face.jpg')
+    with open(temp_file_path, 'wb') as f:
+        f.write(imgdata)
+    return temp_file_path
+
+@csrf_exempt
+def face_login_view(request):
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body)
+            face_image = data.get('face_image')
+            pending_user_id = data.get('user_id')
+
+            if not face_image or not pending_user_id:
+                return JsonResponse({'message': 'Face image and user ID are required'}, status=400)
+
+            temp_file_path = save_temp_image(face_image)
+            User = get_user_model()
+
+            try:
+                user = User.objects.get(id=pending_user_id)
+            except User.DoesNotExist:
+                return JsonResponse({'message': 'User not found'}, status=404)
+
+            if not user.face_image:
+                return JsonResponse({'message': 'No stored face image for this user'}, status=400)
+
+            stored_img_path = user.face_image.path
+            try:
+                result = DeepFace.verify(
+                    img1_path=temp_file_path,
+                    img2_path=stored_img_path,
+                    enforce_detection=True,
+                    detector_backend='opencv'
+                )
+                if result.get("verified"):
+                    django_login(request, user)
+                    print(f'User logged in: ID={user.id}, Email={user.email}')
+                    return JsonResponse({'message': 'Login successful', 'user': {'id': user.id, 'email': user.email}}, status=200)
+                else:
+                    return JsonResponse({'message': 'Face verification failed'}, status=400)
+            except Exception as e:
+                return JsonResponse({'message': str(e)}, status=500)
+
+        except json.JSONDecodeError:
+            return JsonResponse({'message': 'Invalid JSON'}, status=400)
+
+    return JsonResponse({'message': 'Method Not Allowed'}, status=405)
 
 @api_login_required
 def profile(request):
@@ -285,6 +355,9 @@ def update_profile(request):
                 user.tiktok = data['tiktok']
             if 'github' in data:
                 user.github = data['github']
+            if 'firebase_token' in data:
+                user.firebase_token = data['firebase_token']
+                send_push_notification(user.firebase_token, "Congratulations!", "You have notifications turned on.")
             if 'password' in data and data['password']:
                 user.set_password(data['password'])
                 update_session_auth_hash(request, user)
@@ -631,11 +704,12 @@ BASE_URL = "https://api.tranzy.ai/v1/opendata"
 # You could add more endpoints (routes, trips, shapes) as needed
 
 def get_stops(request):
-    """Fetch stops from the Tranzy API."""
+    agency_id = request.GET.get('agency_id', '1')
+    print(agency_id)
     headers = {
-        'Accept': 'application/json',
-        'X-API-KEY': "zbqG3CwEW4dDwJzsMtqXDu6lTglhCnARg9dJWdap",
-        'X-Agency-Id': '1',
+            "Accept": "application/json",
+            "X-API-KEY": API_KEY,
+            "X-Agency-Id": agency_id,
     }
     response = requests.get(f"{BASE_URL}/stops", headers=headers)
     if response.status_code == 200:
@@ -653,11 +727,11 @@ def nearest_stop(request):
     except (TypeError, ValueError):
         return JsonResponse({'error': 'Invalid latitude or longitude'}, status=400)
 
-    # Get stops from the Tranzy API
+    agency_id = request.GET.get('agency_id', '1')
     headers = {
-        'Accept': 'application/json',
-        'X-API-KEY': "zbqG3CwEW4dDwJzsMtqXDu6lTglhCnARg9dJWdap",
-        'X-Agency-Id': '1',
+        "Accept": "application/json",
+        "X-API-KEY": API_KEY,
+        "X-Agency-Id": agency_id,
     }
     response = requests.get(f"{BASE_URL}/stops", headers=headers)
     if response.status_code != 200:
@@ -875,3 +949,53 @@ def contact(request):
             return JsonResponse({"error": str(e)}, status=400)
 
     return JsonResponse({"error": "Invalid request method."}, status=405)
+
+
+
+@csrf_exempt
+def send_notification(request):
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        token = data.get('token')
+
+        if token:
+            # Optionally, subscribe the token to a topic (if not already subscribed)
+            subscribe_token_to_topic(token, topic="allUsers")
+
+            # Send a test notification
+            send_push_notification(token, 'Test Notification', 'Welcome! You are now subscribed.')
+
+            return JsonResponse({'status': 'success'})
+        else:
+            return JsonResponse({'status': 'failure', 'message': 'Token is required'}, status=400)
+    return JsonResponse({'status': 'failure', 'message': 'Invalid request method'}, status=400)
+
+
+@csrf_exempt
+def broadcast_notification(request):
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        title = data.get('title')
+        body = data.get('body')
+
+        if not title or not body:
+            return JsonResponse({'status': 'failure', 'message': 'Title and body are required.'}, status=400)
+
+        # Create a message for the broadcast
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+            topic="allUsers",  # Broadcast to all users subscribed to this topic
+        )
+        try:
+            # Send the broadcast notification
+            response = messaging.send(message)
+            print("Broadcast notification sent:", response)
+            return JsonResponse({'status': 'success', 'response': response})
+        except Exception as e:
+            print("Error sending broadcast notification:", e)
+            return JsonResponse({'status': 'failure', 'message': str(e)}, status=500)
+
+    return JsonResponse({'status': 'failure', 'message': 'Invalid request method'}, status=400)

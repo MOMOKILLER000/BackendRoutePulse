@@ -36,4 +36,6 @@ urlpatterns = [
     path('generate_route/', views.GenerateRouteView.as_view(), name='get_route'),
     path('all_articles/', views.all_articles, name='all_articles'),
     path('contact/', views.contact, name="contact"),
+    path('send-notification/', views.send_notification, name='send_notification'),
+    path('broadcast-notification/', views.broadcast_notification, name='broadcast_notification'),
 ]
